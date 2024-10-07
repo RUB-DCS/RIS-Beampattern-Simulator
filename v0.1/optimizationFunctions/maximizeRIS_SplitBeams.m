@@ -1,0 +1,186 @@
+function [configs] = maximizeRIS_SplitBeams(params)
+    channelDir  = params.chanDir;
+    channelVec1 = params.chan1;
+    channelVec2 = params.chan2;
+        
+    h_eff_mat= channelVec1.*channelVec2;
+
+    C_all = linspace(0,2*pi,3600);
+    C = C_all([(0:params.phaseResolution-1)*floor((3600)/params.phaseResolution)]+1);
+
+    switch params.direct_channel_property
+        case 'blocked'
+
+            phases = [];
+
+
+            selMat1 = zeros(params.N_surfaces_Y*params.N_y,params.N_surfaces_X*params.N_x);
+            selMat2 = zeros(params.N_surfaces_Y*params.N_y,params.N_surfaces_X*params.N_x);
+%             selMat1(:,1:ceil(params.N_surfaces_X*params.N_x/2)) = 1;
+%             selMat2(:,ceil(params.N_surfaces_X*params.N_x/2)+1:end) = 1;
+
+            selMat1(1:ceil(params.N_surfaces_Y*params.N_x/2),:) = 1;
+            selMat2(ceil(params.N_surfaces_Y*params.N_x/2)+1:end,:) = 1;
+
+            
+            selMat1 = reshape(selMat1.',[],1);
+            selMat2 = reshape(selMat2.',[],1);
+            selMat_bool(:,1)=find(selMat1==1);
+            selMat_bool(:,2)=find(selMat2==1);
+
+            %optimize independently
+            for k=1:2
+                vector=C;
+                matrix=(angle(h_eff_mat(selMat_bool(:,k),k)));
+    
+                % Replicate the vector along the third dimension to match the size of the matrix
+                vector_replicated = repmat(vector, size(matrix, 1), size(matrix, 2), 1);
+                
+                % Perform element-wise subtraction
+                phases{k} = permute(repmat(vector', 1, size(matrix, 1), size(matrix, 2)) - permute(matrix, [3, 1, 2]),[2, 3, 1]);
+                
+                h_test_mat{k} = h_eff_mat(selMat_bool(:,k),k).*exp(1i*phases{k});
+    
+           
+                optPhase_quant=[];
+                optPhase_quant = angle(exp(1i*phases{k}));
+                optPhase_quant(abs(optPhase_quant)<pi/2)=0;
+                optPhase_quant(abs(optPhase_quant)>=pi/2)=pi;
+                                
+                optPhase_quant_vec{k} = optPhase_quant;
+
+                %include db loss
+                scalMult = 0.*phases{k}+1;
+                scalMult(find(optPhase_quant)) = db2pow(-3);
+                h_test_quant{k}= (h_eff_mat(selMat_bool(:,k),k).*scalMult).*exp(1i*optPhase_quant);
+            end
+
+            %reintegrate params together
+            h_quant1 = squeeze(h_test_quant{1});
+            h_quant2 = squeeze(h_test_quant{2});
+
+            phaseQuant1 = squeeze(optPhase_quant_vec{1});
+            phaseQuant2 = squeeze(optPhase_quant_vec{2});
+            N_vals_cont = zeros(params.phaseResolution.^2,2);
+
+            if params.matching==0
+                for k=1:params.phaseResolution
+                    %for n=1:params.phaseResolution
+                        n=k;
+                        idx = (k - 1) * params.phaseResolution + n;
+                        N_vals_cont(idx,:) = [k,n];
+                       
+                        h_test_quant_combined(selMat_bool(:,1),idx) =  h_quant1(:,k);
+                        h_test_quant_combined(selMat_bool(:,2),idx) =  h_quant2(:,n);
+    
+                        phaseQuant_combined(selMat_bool(:,1),idx) =  phaseQuant1(:,k);
+                        phaseQuant_combined(selMat_bool(:,2),idx) =  phaseQuant2(:,n);
+                    %end
+                end
+            else
+                 for k=1:params.phaseResolution
+                    for n=1:params.phaseResolution
+                        idx = (k - 1) * params.phaseResolution + n;
+                        N_vals_cont(idx,:) = [k,n];
+                       
+                        h_test_quant_combined(selMat_bool(:,1),idx) =  h_quant1(:,k);
+                        h_test_quant_combined(selMat_bool(:,2),idx) =  h_quant2(:,n);
+    
+                        phaseQuant_combined(selMat_bool(:,1),idx) =  phaseQuant1(:,k);
+                        phaseQuant_combined(selMat_bool(:,2),idx) =  phaseQuant2(:,n);
+                    end
+                end
+            end
+            
+            %compare impact on real channel
+            N_vals = 1:params.phaseResolution;
+            compareInd= (N_vals - 1) * params.phaseResolution + N_vals;
+
+            scalMult = 0.*phaseQuant_combined(:,compareInd)+1;           
+            scalMult(find(phaseQuant_combined(:,compareInd))) = db2pow(-3);
+
+            refChan1 = params.chan1;
+            refChan2 = params.chan2_ref;
+            
+            h_eff_focus = scalMult.*refChan1.*refChan2.*exp(1i.*phaseQuant_combined(:,compareInd));
+            
+            scalMult = 0.*phaseQuant_combined(:,:)+1;           
+            scalMult(find(phaseQuant_combined(:,:))) = db2pow(-3);
+
+            h_eff_focus_all = scalMult.*refChan1.*refChan2.*exp(1i.*phaseQuant_combined(:,:));
+            
+           % [valX,indX] = max(abs(sum(h_eff_focus,1)));  %no matching
+           [valX,indX] = max(abs(sum(h_eff_focus_all,1)));
+
+            bestCombo = N_vals_cont(indX,:);
+% 
+%             if bestCombo(1)~=bestCombo(2)
+%                 bestCombo
+%             end
+            %optPhase_quant_out = phaseQuant_combined(:,compareInd(indX)); %no matching
+            optPhase_quant_out = phaseQuant_combined(:,indX);
+            bestPhaseDirInd = indX;
+            configs.bestPhaseDirCombo=bestCombo;
+
+%            figure
+%             scatter(compareInd,20*log10(abs(sum(h_eff_focus,1))))
+%             hold on
+%             plot(20*log10(abs(sum(h_eff_focus_all,1))))
+% 
+%             legend('impact on focus channel with same phase')
+%             legend('impact on focus channel with same phase')
+
+
+            if ~isfield(params,'TxSweepPoints')
+                if isfield(params,'RxSplitPos')
+                  
+%                     conf = permute(reshape(permute(optPhase_quant,[1,3,2]),64,48,2),[2,1,3]);
+%                     figure
+%                     imagesc(conf(:,:,1))
+%                     figure
+%                     imagesc(conf(:,:,2))
+
+                    %select left/right half of RIS    
+%                     selMat1 = zeros(params.N_surfaces_Y*params.N_y,params.N_surfaces_X*params.N_x);
+%                     selMat2 = zeros(params.N_surfaces_Y*params.N_y,params.N_surfaces_X*params.N_x);
+%                     selMat1(:,1:ceil(params.N_surfaces_X*params.N_x/2)) = 1;
+%                     selMat2(:,floor(params.N_surfaces_X*params.N_x/2):end) = 1;
+%                     selMat1 = reshape(selMat1.',[],1);
+%                     selMat2 = reshape(selMat2.',[],1);
+
+
+
+                else
+                   [bestPhaseDirVals,bestPhaseDirInd] = max(abs(squeeze(sum(h_test_quant,1))),[],1);
+                   optPhase_quant_out = squeeze(optPhase_quant(:,:,bestPhaseDirInd));
+                end
+                  % h_test_quant_out(:,k) = h_test_quant(:,k,bestPhaseDirInd(k));
+            else
+                [bestPhaseDirVals,bestPhaseDirInd] = max(abs(squeeze(sum(h_test_quant,1))),[],2);
+                for k = 1:length(params.TxSweepPoints)
+                   optPhase_quant_out(:,k) = optPhase_quant(:,k,bestPhaseDirInd(k));
+                  % h_test_quant_out(:,k) = h_test_quant(:,k,bestPhaseDirInd(k));
+                end
+            end
+        case 'available'
+            optPhase = angle(channel_Dir)-(angle(channelVec1)+angle(channelVec2)).';
+            h_test2=channel_Dir+channelVec1*diag(exp(1i*optPhase))*channelVec2.';
+            power2=abs(h_test2)^2;
+
+            optPhase_quant = angle(exp(1i*optPhase));
+            optPhase_quant(abs(optPhase_quant)<pi/2)=0;
+            optPhase_quant(abs(optPhase_quant)>=pi/2)=pi;
+
+            h_test_quant=channel_Dir+channelVec1*diag(exp(1i*optPhase_quant))*channelVec2.';
+            power_quant=abs(h_test_quant)^2;
+    end
+    
+    configs.phaseOffsets =  C;
+    configs.cont  = phases;
+    configs.quant = optPhase_quant_out;
+    configs.bestPhaseInd = bestPhaseDirInd;
+    
+%     gains.quantChan = h_test_quant;
+%     gains.linEq = gains_linEq;
+end
+
